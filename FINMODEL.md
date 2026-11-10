@@ -14,12 +14,12 @@ Cash-budget model for FirmVault, LpDesk and Burner, not a forecast or price pred
 | NOTSTOCK fees (FirmVault and LpDesk) | 100% to Burner, burn() by anyone to the dead address |
 | Project wallet | 0x3c587Eff6c96eAcF7E3dcC2CFf6416161386E48C, one constructor value for FirmVault and LpDesk, separate from the dev wallet |
 
-V_m is the month's NOTSTOCK/IMD pool volume in USD equivalent (trade volume, exogenous). FirmVault fee cash is modeled as collected in IMD; any NOTSTOCK fee receipt goes to Burner and is not modeled. USD is a reporting unit only.
+V_m is the month's NOTSTOCK/IMD pool volume in USD equivalent (trade volume, exogenous). FirmVault fee cash is modeled as collected in IMD and distributed within the month; any NOTSTOCK fee goes to Burner and is not modeled. USD is a reporting unit only.
 
 | Formula | Meaning |
 | --- | --- |
 | F_m = 0.01 * V_m | launching-side fee cash for the month |
-| ProjectIncome_m = 0.25 * F_m | to the project wallet, immediate, no accrual |
+| ProjectIncome_m = 0.25 * F_m | to the project wallet by FirmVault distribute(IMD), callable by anyone |
 | LiquidityIn_m = 0.50 * F_m | to LpDesk: half to the IMD top-up basket (existing positions), half to free IMD (new positions) |
 | Buyback_m = 0.25 * F_m | FirmVault buyback bucket, spent only on buying NOTSTOCK and sending it to the dead address |
 
