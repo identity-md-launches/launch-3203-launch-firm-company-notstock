@@ -18,6 +18,7 @@ Token notSTOCK, symbol NOTSTOCK, on Base (chain 8453), paired with IMD. 18 decim
 
 - Pool fee to FirmVault: received fees stay on FirmVault until anyone calls distribute(token), which splits the whole undistributed IMD 25% buyback and burn, 25% project wallet 0x3c587Eff6c96eAcF7E3dcC2CFf6416161386E48C, 25% LpDesk top-up basket, 25% LpDesk free balance, and sends NOTSTOCK to Burner.
 - LpDesk: liquidity positions only on listed venues: six at deploy (Uniswap v4, Uniswap v3, PancakeSwap v3, SushiSwap v3 and two Aerodrome Slipstream position managers), more only by an AddVenue vote of stakers (V3, CL or V4 interface), never removed; no transfer to any wallet but the project wallet; operator may close positions, burn free NOTSTOCK and move ranges; new positions after the first 7 days need a passed, unvetoed LpGovernor proposal.
+- Position staking (PancakeSwap MasterChefV3, Aerodrome gauges) only where the venue has registered the pool; otherwise the position stays in LpDesk and earns only pool fees.
 - Burner: anyone may call burn(); its whole NOTSTOCK balance goes to 0x000000000000000000000000000000000000dEaD.
 - No owner, mint, pause or upgrade in any contract.
 
