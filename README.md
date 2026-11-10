@@ -26,4 +26,5 @@ Token notSTOCK, symbol NOTSTOCK, on Base (chain 8453), paired with IMD. 18 decim
 
 - SPEC.md: binding specification.
 - FINMODEL.md: 12-month cash model, three scenarios.
+- SITE.md: rules of the website, built by a separate order.
 - brand/: logo, logo-64, compare.
