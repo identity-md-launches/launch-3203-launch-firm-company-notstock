@@ -11,7 +11,7 @@ Token notSTOCK, symbol NOTSTOCK, on Base (chain 8453), paired with IMD. 18 decim
 
 ## Launch
 
-- One launch on Base: the notSTOCK token, its NOTSTOCK/IMD pool and, beside the token, LpDesk (its constructor creates Burner), FirmVault and GenesisSplitter. LpDesk's modules LpGovernor and PriceGuard are deployed after the launch by deployModule, callable by anyone, once per module, with the code hash fixed in LpDesk.
+- One launch on Base: the notSTOCK token, its NOTSTOCK/IMD pool and, beside the token, LpDesk (its constructor creates Burner), FirmVault and GenesisSplitter. LpDesk's modules LpGovernor, PriceGuard and any further module are deployed after the launch by deployModule, callable by anyone, once per module, with the code hash fixed in LpDesk.
 - After the launch the project wallet transfers 600 000 000 NOTSTOCK (60%) to GenesisSplitter and sets FirmVault as the pool fee recipient.
 
 ## Rules in short

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-/// @notice Fixed Base (chain id 8453) addresses from SPEC.md sections 1 and 2b.
+/// @notice Fixed Base (chain id 8453) addresses from SPEC.md sections 1, 2b and 6.
 library FirmAddresses {
     address internal constant IMD = 0xFF0C532FDB8Cd566Ae169C1CB157ff2Bdc83E105;
     address internal constant DEV_WALLET = 0x8Ad18E99F4C8d8406f9Ba8899CF308000518A981;
     address internal constant PROJECT_WALLET = 0x3c587Eff6c96eAcF7E3dcC2CFf6416161386E48C;
     address internal constant DEAD = 0x000000000000000000000000000000000000dEaD;
+    address internal constant LAUNCH_FACTORY = 0x82EcAA82B8C1A64773D99295B1157EE502539736;
     address internal constant UNI_V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address internal constant UNI_V4_POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address internal constant UNI_V3_POSITION_MANAGER = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
