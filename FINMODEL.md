@@ -106,7 +106,7 @@ Base is kept below USD 20,000 per day by month 12 by design. Good is a sensitivi
 | Base | 9,424 | 9,424 | 18,848 |
 | Good | 19,380 | 19,380 | 38,760 |
 
-Each buyback slice's NOTSTOCK output is capped at 0.1% of the pool's virtual NOTSTOCK reserve at the current price (SPEC.md section 5) at any price; the model counts the burn only as the USD equivalent of IMD spent.
+Buybacks swap at the pool's price with the operator's minimum out set by hand (SPEC.md section 5); the model counts the burn only as the USD equivalent of IMD spent.
 
 ## LpDesk position income (separate line, explicit assumption)
 
