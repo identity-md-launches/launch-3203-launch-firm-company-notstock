@@ -264,7 +264,7 @@ interface ILpDesk {
     function bridgeOut(address adapter, uint32 dstEid, address dstLpDesk, uint256 amount, address refund)
         external
         payable;
-    function checkOpenPrice(OpenParams calldata) external view;
+    function checkOpenProposal(OpenParams calldata) external view;
 }
 
 interface IFirmVault {

@@ -13,7 +13,7 @@ in FINMODEL.md; every deviation the launch rules required is in ADAPTATION.md.
 | LaunchToken | notSTOCK / NOTSTOCK, fixed supply 1e27, no owner, mint, fee, pause or upgrade | none |
 | LpDesk | the LP desk; creates Burner in its constructor | `$token`, operator `0x8Ad18E99F4C8d8406f9Ba8899CF308000518A981`, project wallet `0x3c587Eff6c96eAcF7E3dcC2CFf6416161386E48C` |
 | FirmVault | pool fee recipient, 25/25/25/25 distribute(), operator buyback to dead | project wallet `0x3c587Eff6c96eAcF7E3dcC2CFf6416161386E48C`, `$contract:LpDesk` |
-| GenesisSplitter | 50/60 to LpDesk, 10/60 to the dev wallet, once | `$contract:LpDesk`, dev wallet `0x8Ad18E99F4C8d8406f9Ba8899CF308000518A981` |
+| GenesisSplitter | 50/60 to LpDesk, 10/60 to the dev wallet, once (`done` flag; later calls revert) | `$contract:LpDesk`, dev wallet `0x8Ad18E99F4C8d8406f9Ba8899CF308000518A981` |
 | Burner | created by LpDesk; burn() sends its whole NOTSTOCK to dead | (LpDesk) |
 | LpGovernor, PriceGuard, VenueV3, VenueV4, DeskSwap | LpDesk modules, deployed after launch by `deployModule(kind, creationCode)` (CREATE2, salt = kind, hash fixed in LpDesk) | none |
 
@@ -56,7 +56,8 @@ dead `0x000000000000000000000000000000000000dEaD`, WETH `0x420000000000000000000
   Burner; any other token reverts. Quarters are floor(undistributed / 4); the remainder (at most
   3 wei) stays undistributed for the next call (ADAPTATION.md 1). The buyback bucket is spent only by
   `buyback(amount, minOut)` from LpDesk's operator: IMD swapped for NOTSTOCK in the launch pool at
-  its price, minOut set by hand, all NOTSTOCK to dead.
+  its price, minOut set by hand, all NOTSTOCK to dead. The bucket drops only by the IMD the pool
+  actually took; on a partial fill the rest stays in the bucket (ADAPTATION.md 9).
 - LpDesk positions only on listed venues: six at deploy (Uniswap v4 `0x7C5f…9bDc`, Uniswap v3
   `0x03a5…34f1`, PancakeSwap v3 `0x46A1…4364`, SushiSwap v3 `0x80C7…14de`, Aerodrome Slipstream
   `0x8279…5b72` and `0x4857…C60b`), more only by an AddVenue vote (V3, CL or V4 interface checks),
@@ -67,18 +68,21 @@ dead `0x000000000000000000000000000000000000dEaD`, WETH `0x420000000000000000000
 - Operator alone, any time: close (withdrawn amounts to free balance), shift range (re-split which
   side is single-sided), move liquidity between its positions, collect fees, increaseLiquidity from
   the top-up basket (no NOTSTOCK taken), buyback from the buyback basket (not IMD) in the position's
-  own pool to dead, burn free NOTSTOCK to dead, hand over the operator role. No other power.
+  own pool to dead (the basket drops only by what the pool took), burn free NOTSTOCK to dead, hand
+  over the operator role. No other power.
 - Fees collected: NOTSTOCK 100% to Burner; every other token 25% buyback (IMD to FirmVault's bucket,
   others to that asset's buyback basket), 25% project wallet, 25% top-up basket, 25% free balance.
 - Open: pool created at the given price if absent; otherwise the pool price must be within 0.5% of
-  the given sqrtPriceX96; amount0Min/amount1Min at least 99.5% of the amounts at that price (an
-  executed OpenPosition uses exactly 99.5%); amount above free balance reverts. `amount` is the
-  NOTSTOCK the position takes, or the asset amount when the range takes no NOTSTOCK at that price.
+  the given sqrtPriceX96. The amounts and the 99.5% floors are computed at the pool's price when it
+  exists, at the given price when LpDesk creates the pool (ADAPTATION.md 8); amount0Min/amount1Min
+  must be at least those floors (an executed OpenPosition uses exactly them); an amount above the
+  free balance reverts at proposal and at open. `amount` is the NOTSTOCK the position takes, or the
+  asset amount when the range takes no NOTSTOCK at that price.
 - Shift, close and move take minimum outs set by hand; buyback takes minOut by hand; no contract minimum.
 - LpGovernor: stake/unstake NOTSTOCK at will, weight checkpointed at the block before creation;
   proposer needs 0.1% of staked supply (operator: any); one open proposal per kind for stakers plus
-  one per kind for the operator; 3-day vote, quorum 3% of staked at the checkpoint and more for than
-  against, else failed; 2-day operator veto (cancel only); then 3 days to execute() once, else expired.
+  one per kind for the operator; 3-day vote, quorum 3% of staked at the checkpoint (rounded up) and
+  more for than against, else failed; 2-day operator veto (cancel only); then 3 days to execute() once, else expired.
   BridgeOut sends free NOTSTOCK through the record's LayerZero OFT adapter only to its dstLpDesk,
   the caller paying the messaging fee as msg.value.
 - LpDesk never deposits a position NFT into any staking, gauge or farm contract; positions earn only pool fees.
@@ -91,22 +95,33 @@ dead `0x000000000000000000000000000000000000dEaD`, WETH `0x420000000000000000000
 - The operator (dev wallet) controls timing and slippage of every position action and the two
   buybacks; it cannot move any asset to a wallet other than the project wallet.
 - Venues and assets are outside contracts with their own owners (USDC, cbBTC and the stocks can
-  blocklist or pause); a paused asset blocks the positions holding it.
+  blocklist or pause); a paused asset blocks the positions holding it. Every position action splits
+  the collected fees in the same call and pushes 25% to the project wallet, so if an issuer
+  blocklists the project wallet, positions in that asset cannot be collected, closed, shifted, moved
+  or topped up while the blocklist lasts (their NOTSTOCK stays in the position).
+- A bridge adapter is checked on chain only by `token() == NOTSTOCK`. A passed, unvetoed AddBridge
+  followed by a BridgeOut lets that adapter pull the proposed free NOTSTOCK; the operator's 2-day
+  veto on every such proposal is the safeguard, so the operator must stay active.
+- Buybacks are exact-input swaps with the extreme price limit; when the pool runs out of liquidity
+  only part of the amount is swapped and the rest stays in the bucket or basket.
 - The launch factory's requester must be the project wallet for setRequester to succeed.
 
 ## Tests
 
 - `forge test`: off-fork suite (`test/Local.t.sol`): token, sizes and module hashes, registration
   record checks, GenesisSplitter, Burner, FirmVault distribute (exact quarters, remainder policy,
-  repeat no-op, fuzz conservation), LpDesk access and burn, LpGovernor (checkpoints, threshold,
-  quorum, majority, slots, veto window, execute once, expiry, bridge flow with a mock OFT), gates.
+  repeat no-op, fuzz conservation, partial-fill buyback keeps the bucket), LpDesk access and burn,
+  LpGovernor (checkpoints, threshold, quorum and its rounding, majority, slots, veto window, execute
+  once, expiry, bridge flow with a mock OFT), gates, mulDiv on products above 2^256.
   The fork suite skips off the fork.
 - `forge test --fork-url <base rpc>`: `test/Fork.t.sol`: the full rehearsal through the live
   factory (gas under 16 777 216, supply 10/30/10/50, FirmVault as requester), then on each of the six
   venues: open at an exact price, trades, collect with the 25/25/25/25 split and NOTSTOCK to Burner,
   asset-only position, top-up rules, shift with minimum outs, buyback to dead, close to free balance;
-  AddVenue of BaseSwap and the 0.5% price check; governance open after the bootstrap; FirmVault
-  buyback in the launch pool; an added 8-decimal asset.
+  AddVenue of BaseSwap and the 0.5% price check; an open within the band after the pool moved
+  (operator and executed proposal); a partial-fill buyback that keeps the basket; proposals checked
+  against the token the range spends; governance open after the bootstrap; FirmVault buyback in
+  the launch pool; an added 8-decimal asset.
 - forge-std is vendored under `test/vendor/forge-std`.
 
 ## Files

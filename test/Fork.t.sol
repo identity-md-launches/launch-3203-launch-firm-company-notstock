@@ -90,6 +90,11 @@ contract ForkTest is Test {
             vm.skip(true);
             return;
         }
+        // Pranked senders hold some ETH: an empty account as a pranked caller reverts on some forge
+        // versions' fork mode, which has nothing to do with the contracts under test.
+        vm.deal(DEV, 1 ether);
+        vm.deal(PROJECT, 1 ether);
+        vm.deal(address(0xBAD), 1 ether);
         bytes memory tokenCode = type(LaunchToken).creationCode;
         address tokenAddr = FACTORY.predictToken(LAUNCH, tokenCode);
         bytes[] memory codes = new bytes[](3);
@@ -484,6 +489,131 @@ contract ForkTest is Test {
         vm.prank(DEV);
         vm.expectRevert(FirmVault.AboveBucket.selector);
         vault.buyback(51e18, 0);
+    }
+
+    /// Finding a7409246: a buyback whose pool cannot absorb the whole input. After the two-sided
+    /// position is closed the pool's only liquidity is a dust NOTSTOCK-only range; the WETH the swap
+    /// did not consume comes back to LpDesk and must stay in the buyback basket, not become free.
+    function test_deskBuybackPartialFillKeepsBasket() public {
+        address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
+        deal(WETH, address(desk), 3_000_000e18);
+        uint256 id = _open(venue, KIND_V3, -6000, 6000, 1_000_000e18);
+        _trade(id, 10_000e18);
+        vm.prank(DEV);
+        desk.collect(id);
+        uint256 basket = desk.buybackBasket(WETH);
+        assertGt(basket, 0);
+        vm.prank(DEV);
+        desk.close(id, 0, 0);
+        // dust NOTSTOCK-only range next to the price
+        bool weth0 = WETH < address(token);
+        (uint160 price,) = VenueV3(desk.venueV3()).poolPrice(desk.positionOf(id));
+        OpenParams memory p = OpenParams(
+            WETH, venue, 3000, 60, weth0 ? int24(-600) : int24(60), weth0 ? int24(-60) : int24(600), price, 1e15, 0, 0
+        );
+        (p.amount0Min, p.amount1Min) = _mins(p);
+        vm.prank(DEV);
+        uint256 dust = desk.open(p);
+        uint256 freeBefore = desk.freeBalance(WETH);
+        uint256 topBefore = desk.topUpBasket(WETH);
+        uint256 wethBefore = IERC20(WETH).balanceOf(address(desk));
+        uint256 deadBefore = token.balanceOf(DEAD);
+        vm.prank(DEV);
+        uint256 out = desk.buyback(dust, basket, 1);
+        uint256 spent = wethBefore - IERC20(WETH).balanceOf(address(desk));
+        assertGt(out, 0);
+        assertLt(spent, basket, "the pool took only part of the input");
+        assertEq(token.balanceOf(DEAD) - deadBefore, out);
+        assertEq(desk.buybackBasket(WETH), basket - spent, "basket drops only by what was swapped");
+        assertEq(desk.freeBalance(WETH), freeBefore, "unswapped basket WETH did not become free");
+        assertEq(desk.topUpBasket(WETH), topBefore);
+        assertEq(IERC20(WETH).balanceOf(desk.deskSwap()), 0);
+    }
+
+    /// Finding 7f08261c: an existing pool within 0.5% of the given price opens, by the operator
+    /// (minimums at the pool's price) and by an executed proposal fixed before the move.
+    function test_openWithinBandAtPoolPrice() public {
+        address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
+        deal(WETH, address(desk), 3_000_000e18);
+        uint256 id = _open(venue, KIND_V3, -6000, 6000, 1_000e18);
+        Position memory pos = desk.positionOf(id);
+        bool weth0 = WETH < address(token);
+        // the proposal is created at the exact price, then the pool moves ~0.3%
+        vm.prank(DEV);
+        token.transfer(address(this), 1000e18);
+        token.approve(address(gov), 1000e18);
+        gov.stake(1000e18);
+        vm.roll(vm.getBlockNumber() + 1);
+        OpenParams memory g = OpenParams(WETH, venue, 3000, 60, -6000, 6000, uint160(DeskMath.Q96), 1_000e18, 0, 0);
+        uint256 pid = gov.proposeOpenPosition(g);
+        gov.vote(pid, true);
+        deal(WETH, address(swapper), 6e18);
+        swapper.swapV3(VenueV3(desk.venueV3()).pool(pos), WETH, weth0, 6e18);
+        (uint160 price,) = VenueV3(desk.venueV3()).poolPrice(pos);
+        assertTrue(price != uint160(DeskMath.Q96));
+        assertTrue(DeskMath.within(price, uint160(DeskMath.Q96)));
+        uint256 r = DeskMath.mulDiv(price, 1e6, DeskMath.Q96);
+        assertTrue(r < 999_500 || r > 1_000_500, "moved by more than 0.1% in sqrt price");
+        // operator: given price Q96, minimums 99.5% of the amounts at the pool's price
+        OpenParams memory p = g;
+        OpenParams memory atPool = g;
+        atPool.sqrtPriceX96 = price;
+        (p.amount0Min, p.amount1Min) = _mins(atPool);
+        uint256 n0 = token.balanceOf(address(desk));
+        vm.prank(DEV);
+        uint256 id2 = desk.open(p);
+        assertTrue(desk.positionOf(id2).open);
+        assertEq(n0 - token.balanceOf(address(desk)), 1_000e18, "amount is the NOTSTOCK the position takes");
+        // minimums below 99.5% at the pool's price revert
+        p.amount0Min = p.amount0Min * 99 / 100;
+        p.amount1Min = p.amount1Min * 99 / 100;
+        vm.prank(DEV);
+        vm.expectRevert(LpDesk.MinTooLow.selector);
+        desk.open(p);
+        // the proposal executes after the vote and veto windows with the pool still 0.3% off
+        vm.warp(vm.getBlockTimestamp() + 5 days);
+        gov.execute(pid);
+        assertTrue(desk.positionOf(desk.positionCount() - 1).open);
+        assertEq(uint8(gov.state(pid)), uint8(LpGovernor.State.Executed));
+    }
+
+    /// Finding 81adb46e: a proposal whose range takes only the asset is checked against the free
+    /// balance of that asset, not of NOTSTOCK.
+    function test_proposeOpenPositionChecksTheSpentToken() public {
+        address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
+        deal(WETH, address(desk), 10e18);
+        vm.prank(DEV);
+        token.transfer(address(this), 1000e18);
+        token.approve(address(gov), 1000e18);
+        gov.stake(1000e18);
+        vm.roll(vm.getBlockNumber() + 1);
+        bool weth0 = WETH < address(token);
+        OpenParams memory p = OpenParams(
+            WETH,
+            venue,
+            3000,
+            60,
+            weth0 ? int24(600) : int24(-6000),
+            weth0 ? int24(6000) : int24(-600),
+            uint160(DeskMath.Q96),
+            100e18,
+            0,
+            0
+        );
+        vm.expectRevert(LpDesk.AboveFree.selector);
+        gov.proposeOpenPosition(p);
+        p.amount = 10e18;
+        uint256 id = gov.proposeOpenPosition(p);
+        // a two-sided range needs both sides free: 1 000 NOTSTOCK and its WETH at the given price
+        OpenParams memory q = OpenParams(WETH, venue, 3000, 60, -6000, 6000, uint160(DeskMath.Q96), 1_000e18, 0, 0);
+        vm.prank(DEV);
+        vm.expectRevert(LpDesk.AboveFree.selector);
+        gov.proposeOpenPosition(q);
+        q.amount = 5e18; // about 5 WETH at price 1 for the symmetric range
+        vm.prank(DEV);
+        gov.proposeOpenPosition(q);
+        assertEq(gov.proposalCount(), 2);
+        assertEq(uint8(gov.proposal(id).kind), uint8(LpGovernor.Kind.OpenPosition));
     }
 
     /// @dev The B20 stock addresses carry EIP-7702 delegation code (0xef0100...) on Base, which the

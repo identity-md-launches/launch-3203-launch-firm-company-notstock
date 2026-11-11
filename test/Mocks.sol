@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {PoolKey, ILaunchRegistry, IOFT, IERC20} from "../src/Interfaces.sol";
+import {PoolKey, ILaunchRegistry, IOFT, IERC20, IPoolManager} from "../src/Interfaces.sol";
 import {LaunchToken} from "../src/LaunchToken.sol";
 import {LpDesk} from "../src/LpDesk.sol";
 import {FirmVault} from "../src/FirmVault.sol";
@@ -133,4 +133,32 @@ contract MockOFT is IOFT {
 
 contract BadOFT {
     address public token = address(0x5555);
+}
+
+interface IUnlockCallback {
+    function unlockCallback(bytes calldata) external returns (bytes memory);
+}
+
+/// @dev A pool manager whose pool runs out of liquidity half way: an exact-input swap of X consumes
+/// only X/2 (the price limit is reached) and pays 1:1 on what it consumed, from its own balance.
+contract HalfDepthPoolManager {
+    function unlock(bytes calldata data) external returns (bytes memory) {
+        return IUnlockCallback(msg.sender).unlockCallback(data);
+    }
+
+    function swap(PoolKey memory, IPoolManager.SwapParams memory p, bytes calldata) external pure returns (int256) {
+        int256 consumed = -p.amountSpecified / 2;
+        (int256 a0, int256 a1) = p.zeroForOne ? (-consumed, consumed) : (consumed, -consumed);
+        return (a0 << 128) | int256(uint256(uint128(int128(a1))));
+    }
+
+    function sync(address) external {}
+
+    function settle() external payable returns (uint256) {
+        return 0;
+    }
+
+    function take(address currency, address to, uint256 amount) external {
+        IERC20(currency).transfer(to, amount);
+    }
 }

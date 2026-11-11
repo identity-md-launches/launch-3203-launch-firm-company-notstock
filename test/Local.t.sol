@@ -2,7 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Test} from "./vendor/forge-std/Test.sol";
-import {MockFactory, MockERC20, MockOFT, BadOFT, OtherVault} from "./Mocks.sol";
+import {MockFactory, MockERC20, MockOFT, BadOFT, OtherVault, HalfDepthPoolManager} from "./Mocks.sol";
 import {LaunchToken} from "../src/LaunchToken.sol";
 import {LpDesk} from "../src/LpDesk.sol";
 import {FirmVault} from "../src/FirmVault.sol";
@@ -53,6 +53,15 @@ contract LocalTest is Test {
         desk.deployModule(4, type(DeskSwap).creationCode);
         gov = LpGovernor(desk.governor());
         guard = PriceGuard(desk.priceGuard());
+        // Pranked senders hold some ETH: an empty account as a pranked caller reverts on some forge
+        // versions' fork mode, which has nothing to do with the contracts under test.
+        vm.deal(alice, 1 ether);
+        vm.deal(bob, 1 ether);
+        vm.deal(DEV, 1 ether);
+        vm.deal(PROJECT, 1 ether);
+        vm.deal(address(0xBAD), 1 ether);
+        vm.deal(address(0xC0), 1 ether);
+        vm.deal(address(0xD1), 1 ether);
     }
 
     function _register() internal {
@@ -178,9 +187,18 @@ contract LocalTest is Test {
         assertEq(token.balanceOf(address(desk)), 500_000_000e18);
         assertEq(token.balanceOf(DEV), 100_000_000e18);
         assertEq(token.balanceOf(address(splitter)), 0);
-        vm.expectRevert(GenesisSplitter.NothingToSplit.selector);
+        vm.expectRevert(GenesisSplitter.AlreadySplit.selector);
         splitter.split();
         assertEq(token.balanceOf(address(desk)), 500_000_000e18);
+        assertTrue(splitter.done());
+        // NOTSTOCK sent after the genesis split is never split again (dev wallet stays at 10/60)
+        vm.prank(PROJECT);
+        token.transfer(address(splitter), 60e18);
+        vm.expectRevert(GenesisSplitter.AlreadySplit.selector);
+        splitter.split();
+        assertEq(token.balanceOf(DEV), 100_000_000e18);
+        assertEq(token.balanceOf(address(desk)), 500_000_000e18);
+        assertEq(token.balanceOf(address(splitter)), 60e18);
     }
 
     function test_splitRoundingPolicy() public {
@@ -260,6 +278,7 @@ contract LocalTest is Test {
     }
 
     function test_vaultCreditPaths() public {
+        vm.deal(address(desk), 1 ether); // pranked caller below (see setUp)
         _register();
         vm.expectRevert(FirmVault.NotLpDesk.selector);
         vault.creditFromDesk(1);
@@ -279,6 +298,41 @@ contract LocalTest is Test {
     }
 
     // ------------------------------------------------------------ LpDesk operator basics
+
+    /// Finding a111b07e: the launch pool absorbs only half of the buyback's IMD. The bucket must drop
+    /// only by what was swapped, and the next distribute() must not hand bucket IMD to anyone.
+    function test_vaultBuybackPartialFillKeepsBucket() public {
+        _register();
+        address pm = f.poolManager();
+        vm.etch(pm, address(new HalfDepthPoolManager()).code);
+        vm.prank(PROJECT);
+        token.transfer(pm, 1_000_000e18);
+        imd.mint(address(vault), 400e18);
+        vault.distribute(IMD);
+        assertEq(vault.buybackBucket(), 100e18);
+        assertEq(vault.undistributed(), 0);
+        uint256 deadBefore = token.balanceOf(DEAD);
+        uint256 projectBefore = imd.balanceOf(PROJECT);
+        vm.prank(DEV);
+        vm.expectRevert(FirmVault.BelowMinOut.selector);
+        vault.buyback(100e18, 50e18 + 1);
+        vm.prank(DEV);
+        uint256 out = vault.buyback(100e18, 50e18);
+        assertEq(out, 50e18);
+        assertEq(token.balanceOf(DEAD) - deadBefore, 50e18);
+        assertEq(imd.balanceOf(address(vault)), 50e18);
+        assertEq(vault.buybackBucket(), 50e18, "bucket drops only by the IMD the pool took");
+        assertEq(vault.undistributed(), 0, "unspent buyback IMD stays in the bucket");
+        vault.distribute(IMD);
+        assertEq(imd.balanceOf(PROJECT), projectBefore, "distribute moves no bucket IMD");
+        assertEq(vault.buybackBucket(), 50e18);
+        assertEq(desk.topUpBasket(IMD), 100e18);
+        assertEq(desk.freeBalance(IMD), 100e18);
+        // a full fill still spends the whole amount
+        vm.prank(DEV);
+        vm.expectRevert(FirmVault.AboveBucket.selector);
+        vault.buyback(50e18 + 1, 0);
+    }
 
     function test_burnAndAccess() public {
         _register();
@@ -472,6 +526,31 @@ contract LocalTest is Test {
         assertEq(uint8(gov.state(id3)), uint8(LpGovernor.State.Failed));
     }
 
+    /// Finding f55e1956: the 3% quorum rounds up, so a vote under 3% of the staked supply fails.
+    function test_quorumRoundsUp() public {
+        _register();
+        _stake(alice, 130);
+        _stake(bob, 3);
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.prank(bob);
+        uint256 id = gov.proposeAddAsset(address(0x77));
+        assertEq(gov.proposal(id).totalAtCheckpoint, 133);
+        vm.prank(bob);
+        gov.vote(id, true); // 3 of 133 = 2.26% < 3%
+        vm.warp(vm.getBlockTimestamp() + 3 days);
+        assertEq(uint8(gov.state(id)), uint8(LpGovernor.State.Failed));
+        vm.prank(alice);
+        gov.unstake(1);
+        _stake(bob, 1); // alice 129, bob 4, total 133: quorum ceil(3.99) = 4
+        vm.roll(vm.getBlockNumber() + 1);
+        vm.prank(bob);
+        uint256 id2 = gov.proposeAddAsset(address(0x77));
+        vm.prank(bob);
+        gov.vote(id2, true);
+        vm.warp(vm.getBlockTimestamp() + 3 days);
+        assertEq(uint8(gov.state(id2)), uint8(LpGovernor.State.Passed));
+    }
+
     function test_addAssetAndVenueGates() public {
         _register();
         vm.startPrank(DEV);
@@ -552,6 +631,23 @@ contract LocalTest is Test {
     function testFuzz_mulDivMatchesSmall(uint128 x, uint128 y, uint128 d) public pure {
         vm.assume(d > 0);
         assertEq(DeskMath.mulDiv(x, y, d), uint256(x) * uint256(y) / uint256(d));
+    }
+
+    /// Finding d836aef0: the Newton seed written without the xor keeps mulDiv exact on products
+    /// above 2^256 (both residues of the odd divisor modulo 4 are fuzzed).
+    function testFuzz_mulDivLargeProducts(uint88 a, uint96 b, uint160 k) public pure {
+        uint256 d = uint256(k) | 1;
+        assertEq(DeskMath.mulDiv(uint256(a) * d, b, d), uint256(a) * uint256(b));
+        assertEq(DeskMath.mulDiv(uint256(a) * d + 1, b, d), (uint256(a) * uint256(b)) + uint256(b) / d);
+    }
+
+    function test_mulDivKnownLargeValues() public pure {
+        // (2^255) * (2^255) / (2^254 + 1): 2^256 - 4 + 4/(2^254+1) -> floor
+        uint256 d = (uint256(1) << 254) + 1;
+        assertEq(DeskMath.mulDiv(uint256(1) << 255, uint256(1) << 255, d), type(uint256).max - 3);
+        // d % 4 == 3 branch
+        uint256 d3 = (uint256(1) << 250) + 3;
+        assertEq(DeskMath.mulDiv(d3 * 7, uint256(1) << 200, d3), 7 << 200);
     }
 
     function testFuzz_vaultSplitConserves(uint96 amount) public {

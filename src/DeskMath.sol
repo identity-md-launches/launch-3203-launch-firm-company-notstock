@@ -68,7 +68,9 @@ library DeskMath {
                 twos := add(div(sub(0, twos), twos), 1)
             }
             prod0 |= prod1 * twos;
-            uint256 inverse = (3 * d) ^ 2;
+            // Newton seed, correct to 4 bits: 3*d with bit 1 flipped (d is odd here), written
+            // without the xor operator that static analysis reads as a mistyped exponent.
+            uint256 inverse = d % 4 == 3 ? 3 * d + 2 : 3 * d - 2;
             inverse *= 2 - d * inverse;
             inverse *= 2 - d * inverse;
             inverse *= 2 - d * inverse;

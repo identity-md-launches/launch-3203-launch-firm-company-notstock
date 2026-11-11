@@ -35,10 +35,10 @@ contract LpDesk {
     uint8 public constant MODULE_SWAP = 4;
 
     /// @dev keccak256(type(Module).creationCode) under foundry.toml; asserted by test/Modules.t.sol.
-    bytes32 public constant GOVERNOR_CODE_HASH = 0x146083fd65c0d7cc7d689ebcbe922d1b5a077b376974fffbe8fe2434c3b57734;
+    bytes32 public constant GOVERNOR_CODE_HASH = 0x3e6c1227d91c268c8a4aa062f01f750ced09a6908277d3adc033d485d24b45ff;
     bytes32 public constant GUARD_CODE_HASH = 0x63e3dede37bc1b5874156de2dac43f31f9613e6d936eb8ba693e2c80518d876b;
     bytes32 public constant VENUE_V3_CODE_HASH = 0x53190319686976d31a42925fb419bf291af7b5554712810c211c9119779d86bf;
-    bytes32 public constant VENUE_V4_CODE_HASH = 0xf97ada8773beccdbc2b36542b97c1690ebc97ccd87b0ec897afc60af16838b79;
+    bytes32 public constant VENUE_V4_CODE_HASH = 0x5321f0ef177b5c8fb60eed1ba89ddc76c70b1b44133b3d05d27af575f5435c42;
     bytes32 public constant SWAP_CODE_HASH = 0x38d317faba523548fe922c975671a4bbe3e04e3c2885565c05394083198c0fc4;
 
     address public immutable token;
@@ -254,11 +254,24 @@ contract LpDesk {
         return _open(p, 0, 0);
     }
 
-    /// @notice Reverts unless the pool for `p` is absent or within 0.5% of p.sqrtPriceX96.
-    function checkOpenPrice(OpenParams calldata p) external view {
+    /// @notice Checks an OpenPosition proposal: the pool for `p` is absent or within 0.5% of
+    /// p.sqrtPriceX96, and the amounts the range takes at the effective price (the token `amount`
+    /// is read as, and the other side) fit the free balances.
+    function checkOpenProposal(OpenParams calldata p) external view {
         Position memory pos = _describe(p);
+        (uint160 price,) = _effectivePrice(pos, p.sqrtPriceX96);
+        (uint256 d0, uint256 d1) = _desired(pos, price, p.amount);
+        if (d0 > freeBalance(pos.token0) || d1 > freeBalance(pos.token1)) revert AboveFree();
+    }
+
+    /// @dev The price amounts and floors are computed at: the pool's own price when the pool exists
+    /// (it must be within 0.5% of the given one, else PriceOff), otherwise the given price, at which
+    /// _open creates the pool (ADAPTATION.md 8).
+    function _effectivePrice(Position memory pos, uint160 given) private view returns (uint160, bool) {
         (uint160 price, bool exists) = _venue(pos.kind).poolPrice(pos);
-        if (exists && !DeskMath.within(price, p.sqrtPriceX96)) revert PriceOff();
+        if (!exists) return (given, false);
+        if (!DeskMath.within(price, given)) revert PriceOff();
+        return (price, true);
     }
 
     function _describe(OpenParams calldata p) private view returns (Position memory pos) {
@@ -274,10 +287,9 @@ contract LpDesk {
     function _open(OpenParams calldata p, uint256 min0, uint256 min1) private returns (uint256 id) {
         Position memory pos = _describe(p);
         IVenueModule m = _venue(pos.kind);
-        (uint160 price, bool exists) = m.poolPrice(pos);
+        (uint160 price, bool exists) = _effectivePrice(pos, p.sqrtPriceX96);
         if (!exists) m.createPool(pos, p.sqrtPriceX96);
-        else if (!DeskMath.within(price, p.sqrtPriceX96)) revert PriceOff();
-        (uint256 d0, uint256 d1) = _desired(pos, p.sqrtPriceX96, p.amount);
+        (uint256 d0, uint256 d1) = _desired(pos, price, p.amount);
         uint256 need0 = d0 * 995 / 1000;
         uint256 need1 = d1 * 995 / 1000;
         if (msg.sender == governor) (min0, min1) = (need0, need1);
@@ -452,6 +464,8 @@ contract LpDesk {
     }
 
     /// @notice Buyback from the asset's buyback basket in the position's own pool; all NOTSTOCK to dead.
+    /// The basket drops only by the asset the pool actually took: what DeskSwap returns unswapped
+    /// on a partial fill stays in the basket.
     function buyback(uint256 id, uint256 amount, uint256 minOut) external onlyOperator returns (uint256 out) {
         Position memory pos = _openPos(id);
         if (pos.asset == IMD) revert IsImd();
@@ -459,10 +473,14 @@ contract LpDesk {
         if (deskSwap.code.length == 0) revert ModuleMissing();
         buybackBasket[pos.asset] -= amount;
         uint256 deadBefore = IERC20(token).balanceOf(DEAD);
+        uint256 assetBefore = IERC20(pos.asset).balanceOf(address(this));
         _send(pos.asset, deskSwap, amount);
         out = IDeskSwap(deskSwap).swap(pos, pos.asset, amount, DEAD);
+        uint256 spent = assetBefore - IERC20(pos.asset).balanceOf(address(this));
+        if (spent > amount) revert AboveBasket();
+        buybackBasket[pos.asset] += amount - spent;
         if (out < minOut || IERC20(token).balanceOf(DEAD) - deadBefore < out) revert BelowMinimum();
-        emit Buyback(id, amount, out);
+        emit Buyback(id, spent, out);
     }
 
     /// @notice Burn free NOTSTOCK to the dead address.

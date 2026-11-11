@@ -174,7 +174,7 @@ contract LpGovernor {
         if (p.executed) return State.Executed;
         if (p.vetoed) return State.Vetoed;
         if (block.timestamp < p.voteEnd) return State.Active;
-        uint256 quorum = p.totalAtCheckpoint * QUORUM_PERCENT / 100;
+        uint256 quorum = (p.totalAtCheckpoint * QUORUM_PERCENT + 99) / 100; // 3%, rounded up
         bool passed = p.forVotes + p.againstVotes >= quorum && p.forVotes > p.againstVotes;
         if (!passed) return State.Failed;
         if (block.timestamp < p.voteEnd + VETO_SECONDS) return State.Passed;
@@ -194,9 +194,10 @@ contract LpGovernor {
         return s == State.Active || s == State.Passed || s == State.Executable;
     }
 
+    /// @notice OpenPosition: LpDesk checks the price band and that the amounts the range takes at
+    /// the effective price (of the token `amount` is read as, and of the other side) are free now.
     function proposeOpenPosition(OpenParams calldata open) external returns (uint256 id) {
-        if (open.amount > lpDesk.freeBalance(lpDesk.token())) revert BadProposal();
-        lpDesk.checkOpenPrice(open);
+        lpDesk.checkOpenProposal(open);
         id = _create(Kind.OpenPosition);
         _proposals[id].open = open;
     }

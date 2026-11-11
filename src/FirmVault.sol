@@ -80,8 +80,9 @@ contract FirmVault {
         }
     }
 
-    /// @notice Operator-only buyback: swaps `amount` IMD of the bucket for NOTSTOCK in the registered
-    /// pool at its price, output below `minOut` reverts, all NOTSTOCK to dead.
+    /// @notice Operator-only buyback: swaps up to `amount` IMD of the bucket for NOTSTOCK in the
+    /// registered pool at its price, output below `minOut` reverts, all NOTSTOCK to dead. The bucket
+    /// drops only by the IMD the pool actually took: on a partial fill the rest stays in the bucket.
     function buyback(uint256 amount, uint256 minOut) external returns (uint256 out) {
         if (msg.sender != lpDeskContract.operator()) revert NotOperator();
         if (amount > buybackBucket) revert AboveBucket();
@@ -94,9 +95,12 @@ contract FirmVault {
         bytes memory ret = IPoolManager(pm).unlock(data);
         _poolManager = address(0);
         _swapHash = bytes32(0);
-        out = abi.decode(ret, (uint256));
+        uint256 paid;
+        (out, paid) = abi.decode(ret, (uint256, uint256));
+        if (paid > amount) revert AboveBucket();
+        buybackBucket += amount - paid;
         if (out < minOut) revert BelowMinOut();
-        emit Buyback(amount, out);
+        emit Buyback(paid, out);
     }
 
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
@@ -120,7 +124,7 @@ contract FirmVault {
         _send(IMD, address(pm), paid);
         pm.settle();
         pm.take(zeroForOne ? key.currency1 : key.currency0, DEAD, out);
-        return abi.encode(out);
+        return abi.encode(out, paid);
     }
 
     function _send(address token, address to, uint256 amount) private {
