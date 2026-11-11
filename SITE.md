@@ -2,6 +2,7 @@
 
 Built by a separate order after the launch of SPEC.md, against the deployed addresses of that launch (Base mainnet 8453).
 
+- First screen of the home page: directly under the logo, the slogan "Don't work for the firm. Let the firm work for you." in exactly this text. (fail, don't change)
 - All addresses and numbers are fixed; if a step cannot be met, fail instead of changing them.
 - Every page reads FirmVault, LpDesk, LpGovernor, PriceGuard, and Burner of this launch through public RPCs; the site stores, signs and relays nothing. (fail, don't change)
 - Home page: the NOTSTOCK/IMD price, FirmVault's buyback bucket balance, its undistributed IMD and NOTSTOCK with a Distribute button for any connected wallet, and the 25/25/25/25 fee split, LpDesk's open positions and their value, its top-up and buyback baskets per token, the project wallet's received total, and the latest weekly report (fee receipts, buyback executions, dead-address balance change), read live from chain. (fail, don't change)
