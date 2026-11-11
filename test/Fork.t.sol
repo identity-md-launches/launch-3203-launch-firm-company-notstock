@@ -74,6 +74,7 @@ contract ForkTest is Test {
     address constant WETH = 0x4200000000000000000000000000000000000006;
     address constant BASESWAP = 0xDe151D5c92BfAA288Db4B67c21CD55d5826bCc93;
     uint64 constant LAUNCH = 777_777;
+    uint256 constant FORK_BLOCK = 56_034_096;
 
     LaunchToken token;
     LpDesk desk;
@@ -86,10 +87,12 @@ contract ForkTest is Test {
     address distributor;
 
     function setUp() public {
-        if (block.chainid != 8453) {
+        string memory url = vm.envOr("BASE_RPC_URL", string(""));
+        if (bytes(url).length == 0) {
             vm.skip(true);
             return;
         }
+        vm.createSelectFork(url, FORK_BLOCK);
         // Pranked senders hold some ETH: an empty account as a pranked caller reverts on some forge
         // versions' fork mode, which has nothing to do with the contracts under test.
         vm.deal(DEV, 1 ether);
@@ -172,7 +175,57 @@ contract ForkTest is Test {
         swapper = new Swapper();
     }
 
-    function test_rehearsalSupplyAndRecord() public view {
+    /// @notice Every fork scenario, run one after another from the same post-launch state.
+    /// @dev The scenarios run in sequence in one test, not as parallel test functions: forge forks
+    /// every test function on its own thread, and fifteen launch rehearsals reading the chain at
+    /// once got rate limited (HTTP 429) by the RPC endpoint. Run in sequence, the fork reads its
+    /// state once into a shared cache. The state is reverted to the snapshot taken after setUp
+    /// before each scenario, so each one starts from the launch exactly as a separate test would.
+    function test_forkScenariosInSequence() public {
+        uint256 s = vm.snapshotState();
+        _scenario_rehearsalSupplyAndRecord();
+        _reset(s);
+        // each of the six SPEC 2b venues
+        _scenario_uniswapV4();
+        _reset(s);
+        _scenario_uniswapV3();
+        _reset(s);
+        _scenario_pancakeV3();
+        _reset(s);
+        _scenario_sushiV3();
+        _reset(s);
+        _scenario_aerodromeCL();
+        _reset(s);
+        _scenario_aerodromeCL2();
+        _reset(s);
+        // AddVenue, unlisted venue, 0.5% price check, minimums, above-free
+        _scenario_unlistedVenueAndPriceCheck();
+        _reset(s);
+        _scenario_governanceOpenAfterBootstrap();
+        _reset(s);
+        // FirmVault distribute and buyback in the launch pool
+        _scenario_vaultBuybackMinOutAtThePoolOutput();
+        _reset(s);
+        _scenario_vaultBuybackInLaunchPool();
+        _reset(s);
+        _scenario_deskBuybackPartialFillKeepsBasket();
+        _reset(s);
+        _scenario_openWithinBandAtPoolPrice();
+        _reset(s);
+        _scenario_proposeOpenPositionChecksTheSpentToken();
+        _reset(s);
+        _scenario_addedEightDecimalAssetOpens();
+        _reset(s);
+        // the reset really restores the launch state
+        assertEq(desk.positionCount(), 0);
+        assertEq(token.balanceOf(address(desk)), 500_000_000e18);
+    }
+
+    function _reset(uint256 s) internal {
+        assertTrue(vm.revertToState(s), "revert to post-launch state");
+    }
+
+    function _scenario_rehearsalSupplyAndRecord() internal view {
         assertLt(launchGas, 16_777_216);
         assertEq(token.balanceOf(distributor), 100_000_000e18);
         assertEq(token.balanceOf(DEV), 100_000_000e18);
@@ -360,31 +413,31 @@ contract ForkTest is Test {
         assertEq(IERC20(WETH).balanceOf(desk.deskSwap()), 0);
     }
 
-    function test_uniswapV4() public {
+    function _scenario_uniswapV4() internal {
         _exerciseVenue(0x7C5f5A4bBd8fD63184577525326123B519429bDc, KIND_V4);
     }
 
-    function test_uniswapV3() public {
+    function _scenario_uniswapV3() internal {
         _exerciseVenue(0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1, KIND_V3);
     }
 
-    function test_pancakeV3() public {
+    function _scenario_pancakeV3() internal {
         _exerciseVenue(0x46A15B0b27311cedF172AB29E4f4766fbE7F4364, KIND_V3);
     }
 
-    function test_sushiV3() public {
+    function _scenario_sushiV3() internal {
         _exerciseVenue(0x80C7DD17B01855a6D2347444a0FCC36136a314de, KIND_V3);
     }
 
-    function test_aerodromeCL() public {
+    function _scenario_aerodromeCL() internal {
         _exerciseVenue(0x827922686190790b37229fd06084350E74485b72, KIND_CL);
     }
 
-    function test_aerodromeCL2() public {
+    function _scenario_aerodromeCL2() internal {
         _exerciseVenue(0x4857DB576eE0e45F10525eC59527BfD10beeC60b, KIND_CL);
     }
 
-    function test_unlistedVenueAndPriceCheck() public {
+    function _scenario_unlistedVenueAndPriceCheck() internal {
         deal(WETH, address(desk), 3_000_000e18);
         OpenParams memory p = OpenParams(WETH, BASESWAP, 2500, 60, -6000, 6000, uint160(DeskMath.Q96), 1e18, 0, 0);
         vm.prank(DEV);
@@ -432,7 +485,7 @@ contract ForkTest is Test {
         desk.close(pid, 0, 0);
     }
 
-    function test_governanceOpenAfterBootstrap() public {
+    function _scenario_governanceOpenAfterBootstrap() internal {
         deal(WETH, address(desk), 3_000_000e18);
         vm.warp(desk.bootstrapEnd());
         (uint24 fee, int24 ts) = _ticks(0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1, KIND_V3);
@@ -466,7 +519,46 @@ contract ForkTest is Test {
         gov.execute(id);
     }
 
-    function test_vaultBuybackInLaunchPool() public {
+    /// The pool's own output for `amount` is the boundary: one wei above it reverts and leaves the
+    /// bucket and dead untouched, exactly it executes; a repeat distribute() moves nothing.
+    function _scenario_vaultBuybackMinOutAtThePoolOutput() internal {
+        deal(IMD, address(0xF00), 1_000e18);
+        vm.prank(address(0xF00));
+        IERC20(IMD).transfer(address(vault), 1_000e18);
+        vault.distribute(IMD);
+        assertEq(vault.buybackBucket(), 250e18);
+        uint256 projectAfter = IERC20(IMD).balanceOf(PROJECT);
+        vault.distribute(IMD);
+        assertEq(IERC20(IMD).balanceOf(PROJECT), projectAfter, "repeat distribute moves nothing");
+        assertEq(vault.buybackBucket(), 250e18);
+
+        uint256 snap = vm.snapshotState();
+        vm.prank(DEV);
+        uint256 quoted = vault.buyback(20e18, 0);
+        assertGt(quoted, 0);
+        vm.revertToState(snap);
+
+        uint256 deadBefore = token.balanceOf(DEAD);
+        vm.prank(DEV);
+        vm.expectRevert(FirmVault.BelowMinOut.selector);
+        vault.buyback(20e18, quoted + 1);
+        assertEq(vault.buybackBucket(), 250e18);
+        assertEq(token.balanceOf(DEAD), deadBefore);
+
+        vm.prank(PROJECT);
+        vm.expectRevert(FirmVault.NotOperator.selector);
+        vault.buyback(20e18, 0);
+
+        vm.prank(DEV);
+        uint256 out = vault.buyback(20e18, quoted);
+        assertEq(out, quoted);
+        assertEq(token.balanceOf(DEAD) - deadBefore, out, "all NOTSTOCK out to dead");
+        assertEq(vault.buybackBucket(), 230e18, "bucket drops by exactly amount");
+        assertEq(token.balanceOf(address(vault)), 0);
+        assertEq(desk.topUpBasket(IMD), 250e18, "desk basket untouched by the vault buyback");
+    }
+
+    function _scenario_vaultBuybackInLaunchPool() internal {
         deal(IMD, address(vault), 400e18);
         vault.distribute(IMD);
         assertEq(vault.buybackBucket(), 100e18);
@@ -494,7 +586,7 @@ contract ForkTest is Test {
     /// Finding a7409246: a buyback whose pool cannot absorb the whole input. After the two-sided
     /// position is closed the pool's only liquidity is a dust NOTSTOCK-only range; the WETH the swap
     /// did not consume comes back to LpDesk and must stay in the buyback basket, not become free.
-    function test_deskBuybackPartialFillKeepsBasket() public {
+    function _scenario_deskBuybackPartialFillKeepsBasket() internal {
         address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
         deal(WETH, address(desk), 3_000_000e18);
         uint256 id = _open(venue, KIND_V3, -6000, 6000, 1_000_000e18);
@@ -532,7 +624,7 @@ contract ForkTest is Test {
 
     /// Finding 7f08261c: an existing pool within 0.5% of the given price opens, by the operator
     /// (minimums at the pool's price) and by an executed proposal fixed before the move.
-    function test_openWithinBandAtPoolPrice() public {
+    function _scenario_openWithinBandAtPoolPrice() internal {
         address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
         deal(WETH, address(desk), 3_000_000e18);
         uint256 id = _open(venue, KIND_V3, -6000, 6000, 1_000e18);
@@ -579,7 +671,7 @@ contract ForkTest is Test {
 
     /// Finding 81adb46e: a proposal whose range takes only the asset is checked against the free
     /// balance of that asset, not of NOTSTOCK.
-    function test_proposeOpenPositionChecksTheSpentToken() public {
+    function _scenario_proposeOpenPositionChecksTheSpentToken() internal {
         address venue = 0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1;
         deal(WETH, address(desk), 10e18);
         vm.prank(DEV);
@@ -619,7 +711,7 @@ contract ForkTest is Test {
     /// @dev The B20 stock addresses carry EIP-7702 delegation code (0xef0100...) on Base, which the
     /// fork resolves before vm.etch's code, so no test calls them (SPEC 6); the asset list only
     /// checks their constants (Local.t.sol). An added 8-decimal asset opens like any other.
-    function test_addedEightDecimalAssetOpens() public {
+    function _scenario_addedEightDecimalAssetOpens() internal {
         MockERC20 stock = new MockERC20("GOOGLc", "GOOGLc", 8);
         stock.mint(address(desk), 1e30); // enough at the 1:1 opening price of the test
         vm.prank(DEV);
